@@ -1,3 +1,6 @@
 env/
 *.pyc
 *.jpeg
+Roboto-Bold.ttf
+Roboto-Regular.ttf
+TagWriter_MassEncoding_template_eng.csv

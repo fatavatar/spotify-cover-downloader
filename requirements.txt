@@ -1,5 +1,9 @@
-certifi==2018.4.16
+certifi==2020.6.20
 chardet==3.0.4
-idna==2.7
-requests>=2.20.0
-urllib3>=1.24.2
+idna==2.10
+numpy==1.16.6
+Pillow==6.2.2
+pkg-resources==0.0.0
+requests==2.24.0
+scipy==1.2.3
+urllib3==1.25.11

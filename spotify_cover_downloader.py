@@ -1,8 +1,18 @@
 import requests
 import os
+import binascii
+import struct
 import argparse
 import sys
+import shutil
+from PIL import Image, ImageDraw, ImageFont
 from urlparse import urlparse
+import numpy as np
+import scipy
+import scipy.misc
+import scipy.cluster
+
+NUM_CLUSTERS = 5
 
 CLIENT_ID = ""
 CLIENT_SECRET = ""
@@ -46,31 +56,119 @@ def get_api_url(url):
 
     return "https://api.spotify.com/v1/%ss/%s" % (type, spotify_id)  # add an 's' after the type
 
+def spotify_download_playlist(url, headers, directory):
+    url = get_api_url(url)
+    response = requests.get(url, headers=headers).json()
+    create_csv(directory)
+    for item in response["tracks"]["items"]:
+        spotify_get_images(item['track'], directory)
+        write_to_csv(item['track'], directory)
 
-def spotify_cover_downloader(url, client_id, client_secret, directory):
+
+def create_csv(directory):
+    shutil.copy("TagWriter_MassEncoding_template_eng.csv", os.path.join(directory, "playlist.csv"))
+
+def write_to_csv(trackdata, directory):
+    with open(os.path.join(directory, "playlist.csv"), "a") as myfile:
+        myfile.write("URL,%s,URI,%s - %s,,,\n" % (trackdata['uri'], trackdata['artists'][0]['name'], trackdata['name']))
+
+
+def spotify_code_url(format, size, bgcolor, textcolor, uri):
+    """
+    url = https://scannables.scdn.co/uri/plain/[format]/[background-color-in-hex]/[code-color-in-text]/[size]/[spotify-URI]
+    """
+    return "https://scannables.scdn.co/uri/plain/%s/%s/%s/%s/%s" % (format, bgcolor, textcolor, str(size), uri)
+
+
+def spotify_cover_downloader(url, headers, directory):
     """
     Download an album cover from Spotify
     """
-    headers = {"Authorization": "Bearer %s" % get_access_token(client_id, client_secret)}
     url = get_api_url(url)
 
     response = requests.get(url, headers=headers).json()
 
-    cover_url = response['album']['images'][0]['url']
-    file_name = response['id'] + '.jpeg'
+    spotify_get_images(response, directory)
+
+def spotify_get_images(trackdata, directory):
+
+    cover_url = trackdata['album']['images'][0]['url']
+    cover_name = trackdata['id'] + '_cover.jpeg'
     if directory:
-        file_name = os.path.join(directory, file_name)
+        cover_name = os.path.join(directory, cover_name)
 
     img_data = requests.get(cover_url).content
-    with open(file_name, 'wb') as handler:
+    with open(cover_name, 'wb') as handler:
         handler.write(img_data)
+        print "Your cover was saved! (%s)" % cover_name
 
-    print "Your cover was saved! (%s)" % file_name
+    im = Image.open(cover_name)
+    im = im.resize((150, 150))      # optional, to reduce time
+    ar = np.asarray(im)
+    shape = ar.shape
+    ar = ar.reshape(scipy.product(shape[:2]), shape[2]).astype(float)
+
+    # print('finding clusters')
+    codes, dist = scipy.cluster.vq.kmeans(ar, NUM_CLUSTERS)
+    # print('cluster centres:\n', codes)
+
+    vecs, dist = scipy.cluster.vq.vq(ar, codes)         # assign codes
+    counts, bins = scipy.histogram(vecs, len(codes))    # count occurrences
+
+    index_max = scipy.argmax(counts)                    # find most frequent
+    peak = codes[index_max]
+    colour = binascii.hexlify(bytearray(int(c) for c in peak)).decode('ascii')
+    print('most frequent is %s (#%s)' % (str(peak), colour))
+    luminance = ( 0.299 * peak[0] + 0.587 * peak[1] + 0.114 * peak[2])/255
+    if luminance > 0.5:
+        text = "black"
+    else:
+        text = "white"
+    code_url = spotify_code_url("png", 640, colour, text, trackdata['uri'])
+    print(code_url)
+    code_data = requests.get(code_url).content
+    code_name = trackdata['id'] + '_code.png'
+    if directory:
+        code_name = os.path.join(directory, code_name)
+    with open(code_name, 'wb') as handler:
+        handler.write(code_data)
+        print "Your code was saved! (%s)" % code_name
+    
+    images = [Image.open(x) for x in [cover_name, code_name]]
+    widths, heights = zip(*(i.size for i in images))
+
+    width = max(widths)
+    height = int(width*7/5)
+    fillheight = height - sum(heights) 
+
+    new_im = Image.new('RGB', (width, height))
+   
+    y_offset = 0
+    new_im.paste(images[0], (0,0))
+    # new_im.paste(text_img, (0,images[0].size[1]))
+    new_im.paste(images[1], (0,height-images[1].size[1]))
+    
+    draw = ImageDraw.Draw(new_im)
+
+    song_font = ImageFont.truetype('Roboto-Bold.ttf', size=40)
+    artist_font = ImageFont.truetype('Roboto-Regular.ttf', size=30)
+    draw.rectangle([(0,images[0].size[1]),(width, fillheight + images[0].size[1])], 
+        fill='#' + colour)
+    draw.text((40,20 + images[0].size[1]), trackdata['artists'][0]['name'], fill=text, font=artist_font)
+    draw.text((40,60 + images[0].size[1]), trackdata['name'], fill=text, font=song_font)
+
+    full_name = trackdata['id'] + '_full.png'
+    if directory:
+        full_name = os.path.join(directory, full_name)
+    
+    new_im.save(full_name)
+    
+    
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Download album cover from Spotify.')
-    parser.add_argument("url", help="Song or album url")
+    parser.add_argument("url", help="Song or playlist url")
     parser.add_argument("--directory", help="download directory")
     parser.add_argument("--client_id", help="Spotify client_id")
     parser.add_argument("--client_secret", help="Spotify client_secret")
@@ -81,7 +179,12 @@ if __name__ == "__main__":
         client_id = args.client_id
         client_secret = args.client_secret
     else:
-        client_id = CLIENT_ID
-        client_secret = CLIENT_SECRET
+        client_id = os.environ.get("SPOTIFY_CLIENT_ID", CLIENT_ID)
+        client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", CLIENT_SECRET)
 
-    spotify_cover_downloader(args.url, client_id, client_secret, args.directory)
+    headers = {"Authorization": "Bearer %s" % get_access_token(client_id, client_secret)}
+
+    if "playlist" in args.url:
+        spotify_download_playlist(args.url, headers, args.directory)
+    else:
+        spotify_cover_downloader(args.url, headers, args.directory)
